@@ -6,7 +6,7 @@ module Reservations =
 
     type IReservations =
         inherit seq<Envelope<Reservation>>
-        abstract Between : DateTimeOffset -> DateTimeOffset -> seq<Envelope<Reservation>>
+        abstract Between : DateTime -> DateTime -> seq<Envelope<Reservation>>
 
     type ReservationsInMemory(reservations) =
         interface IReservations with
@@ -23,9 +23,9 @@ module Reservations =
     let Between min max (reservations : IReservations) =
         reservations.Between min max
 
-    let On (date : DateTimeOffset) reservations =
-        let min = DateTimeOffset(date.Date)
-        let max = DateTimeOffset(min.Date.AddDays 1.) - TimeSpan.FromTicks 1L
+    let On (date : DateTime) reservations =
+        let min = date.Date
+        let max = (min.Date.AddDays 1.) - TimeSpan.FromTicks 1L
         reservations |> Between min max
 
     let Handle capacity reservations (request : Envelope<MakeReservation>) =

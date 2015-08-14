@@ -2,30 +2,15 @@
 
 open System
 open System.Net.Http
+open System.Reactive
 open System.Web.Http
 open System.Web.Http.Controllers
 open System.Web.Http.Dispatcher
 open BookingApi2
 open Reservations
 
-type Agent<'a> = Microsoft.FSharp.Control.MailboxProcessor<'a>
-
-type CompositionRoot(reservations : System.Collections.Concurrent.ConcurrentBag<Envelope<Reservation>>) =
-    let seatingCapacity = 10
-
-    let agent = new Agent<Envelope<MakeReservation>>(fun inbox ->
-        let rec loop () =
-            async {
-                let! cmd = inbox.Receive()
-                let rs = reservations |> ToReservations
-                let handle = Handle seatingCapacity rs
-                let newReservations = handle cmd
-                match newReservations with 
-                | Some(r) -> reservations.Add r
-                | _ -> ()
-                return! loop() }
-        loop())
-    do agent.Start()
+type CompositionRoot(reservations : IReservations,
+                     reservationRequestObserver : IObserver<Envelope<MakeReservation>>) =
 
     interface IHttpControllerActivator with
         member this.Create(request, controllerDescriptor, controllerType) =
@@ -33,16 +18,17 @@ type CompositionRoot(reservations : System.Collections.Concurrent.ConcurrentBag<
                 new HomeController() :> IHttpController
             elif controllerType = typeof<ReservationsController> then
                 let c = new ReservationsController()
-                let sub = c.Subscribe agent.Post
-                request.RegisterForDispose sub
+                c
+                |> Observable.subscribe reservationRequestObserver.OnNext
+                |> request.RegisterForDispose
                 c :> IHttpController
             else
                 invalidArg (sprintf "Unknown controller type requested: %O" controllerType) "controllerType"
 
-let ConfigureServices reservations (config : HttpConfiguration) =
+let ConfigureServices reservations (reservationRequestObserver : IObserver<Envelope<MakeReservation>>)  (config : HttpConfiguration) =
     config.Services.Replace(
         typeof<IHttpControllerActivator>,
-        CompositionRoot reservations)
+        CompositionRoot(reservations,reservationRequestObserver))
 
-let Configure reservations (config : HttpConfiguration) =
-    ConfigureServices reservations config
+let Configure reservations (reservationRequestObserver : IObserver<Envelope<MakeReservation>>) (config : HttpConfiguration) =
+    ConfigureServices reservations reservationRequestObserver config

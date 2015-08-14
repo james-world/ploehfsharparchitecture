@@ -4,7 +4,7 @@ open System
 
 [<CLIMutable>]
 type MakeReservation = {
-    Date : DateTimeOffset
+    Date : DateTime
     Name : string
     Email : string
     Quantity : int }
@@ -15,7 +15,7 @@ module Envelope =
     [<CLIMutable>]
     type Envelope<'a> = {
         Id : Guid
-        Created : DateTimeOffset
+        Created : DateTime
         Item : 'a }
 
     let Envelop id created item = {
@@ -24,11 +24,17 @@ module Envelope =
         Item = item }
 
     let EnvelopWithDefaults item =
-        Envelop (Guid.NewGuid()) (DateTimeOffset.UtcNow) item
+        Envelop (Guid.NewGuid()) (DateTime.UtcNow) item
 
 [<CLIMutable>]
 type Reservation = {
-    Date : DateTimeOffset
+    Date : DateTime
     Name : string
     Email : string
     Quantity : int }
+
+[<CLIMutable>]
+type Notification = {
+    About : Guid
+    Type : string
+    Message : string }
