@@ -19,6 +19,7 @@
     <WebGreaseLibPath>$(SolutionDir)\packages\WebGrease.1.5.2\lib</WebGreaseLibPath>
     <Name>BookingApi2.WebHost</Name>
     <NuGetPackageImportStamp>889d21d5</NuGetPackageImportStamp>
+    <NameOfLastUsedPublishProfile>whirly-bookingapi</NameOfLastUsedPublishProfile>
   </PropertyGroup>
   <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Debug|AnyCPU' ">
     <DebugSymbols>true</DebugSymbols>
