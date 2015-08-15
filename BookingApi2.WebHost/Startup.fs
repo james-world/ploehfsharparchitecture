@@ -81,6 +81,8 @@ type Startup() =
         Configure
             (reservations |> ToReservations)
             (Observer.Create (fun x-> agent.Post x))
+            (notifications |> Notifications.ToNotifications)
+            seatingCapacity
             config
         
         Startup.RegisterWebApi config

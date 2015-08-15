@@ -8,9 +8,12 @@ open System.Web.Http.Controllers
 open System.Web.Http.Dispatcher
 open BookingApi2
 open Reservations
+open Notifications
 
 type CompositionRoot(reservations : IReservations,
-                     reservationRequestObserver : IObserver<Envelope<MakeReservation>>) =
+                     reservationRequestObserver : IObserver<Envelope<MakeReservation>>,
+                     notifications : INotifications,
+                     seatingCapacity) =
 
     interface IHttpControllerActivator with
         member this.Create(request, controllerDescriptor, controllerType) =
@@ -22,13 +25,28 @@ type CompositionRoot(reservations : IReservations,
                 |> Observable.subscribe reservationRequestObserver.OnNext
                 |> request.RegisterForDispose
                 c :> IHttpController
+            elif controllerType = typeof<NotificationsController> then
+                let c = new NotificationsController(notifications)
+                c :> IHttpController
+            elif controllerType = typeof<AvailabilityController> then
+                let c = new AvailabilityController(seatingCapacity)
+                c :> IHttpController
             else
                 invalidArg (sprintf "Unknown controller type requested: %O" controllerType) "controllerType"
 
-let ConfigureServices reservations (reservationRequestObserver : IObserver<Envelope<MakeReservation>>)  (config : HttpConfiguration) =
+let ConfigureServices
+    reservations
+    (reservationRequestObserver : IObserver<Envelope<MakeReservation>>)
+    notifications
+    seatingCapacity
+    (config : HttpConfiguration) =
     config.Services.Replace(
         typeof<IHttpControllerActivator>,
-        CompositionRoot(reservations,reservationRequestObserver))
+        CompositionRoot(reservations,reservationRequestObserver, notifications, seatingCapacity))
 
-let Configure reservations (reservationRequestObserver : IObserver<Envelope<MakeReservation>>) (config : HttpConfiguration) =
-    ConfigureServices reservations reservationRequestObserver config
+let Configure reservations
+              (reservationRequestObserver : IObserver<Envelope<MakeReservation>>)
+              notifications
+              seatingCapacity
+              (config : HttpConfiguration) =
+    ConfigureServices reservations reservationRequestObserver notifications seatingCapacity config
