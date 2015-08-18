@@ -13,7 +13,56 @@ open BookingApi2.Infrastructure
 open BookingApi2.Reservations
 open System.Collections.Concurrent
 open System.Reactive.Subjects
+open System.IO
+open Newtonsoft.Json
 
+
+type ReservationsInFiles(directory : DirectoryInfo) =
+    let toReservation (f: FileInfo) =
+        let json = File.ReadAllText f.FullName
+        JsonConvert.DeserializeObject<Envelope<Reservation>>(json)
+    let toEnumerator (s : seq<'a>) = s.GetEnumerator()
+    let getContainingDirectory (d : DateTime) =
+        Path.Combine(
+            directory.FullName,
+            d.Year.ToString(),
+            d.Month.ToString(),
+            d.Day.ToString())
+    let appendPath p2 p1 = Path.Combine(p1, p2)
+    let getJsonFiles (dir : DirectoryInfo) =
+        if Directory.Exists(dir.FullName) then
+            dir.EnumerateFiles("*.json", SearchOption.AllDirectories)
+        else
+            Seq.empty<FileInfo>
+
+    member this.Write (reservation : Envelope<Reservation>) =
+        let withExtension extension path = Path.ChangeExtension(path, extension)
+        let directoryName = reservation.Item.Date |> getContainingDirectory
+        let fileName =
+            directoryName
+            |> appendPath (reservation.Id.ToString())
+            |> withExtension "json"
+        let json = JsonConvert.SerializeObject reservation
+        Directory.CreateDirectory directoryName |> ignore
+        File.WriteAllText(fileName, json)
+
+    interface IReservations with
+        member this.Between min max =
+            Dates.InitInfinite min
+            |> Seq.takeWhile (fun d-> d <= max)
+            |> Seq.map getContainingDirectory
+            |> Seq.collect (fun dir -> DirectoryInfo(dir) |> getJsonFiles)
+            |> Seq.map toReservation
+
+        member this.GetEnumerator() =
+            directory
+            |> getJsonFiles
+            |> Seq.map toReservation
+            |> toEnumerator
+
+        member this.GetEnumerator() =
+            (this :> seq<Envelope<Reservation>>).GetEnumerator()
+                :> System.Collections.IEnumerator
 
 type Agent<'a> = Microsoft.FSharp.Control.MailboxProcessor<'a>
 
@@ -33,11 +82,13 @@ type Startup() =
     member __.Configuration(builder: IAppBuilder) =
         let seatingCapacity = 10
         let config = new HttpConfiguration()
-        let reservations = ConcurrentBag<Envelope<Reservation>>()
+
+        let dir = DirectoryInfo(System.Web.HttpContext.Current.Server.MapPath("~/ReservationStore"))
+        let reservations = ReservationsInFiles(dir)
         let notifications = ConcurrentBag<Envelope<Notification>>()
 
         let reservationSubject = new Subject<Envelope<Reservation>>()
-        reservationSubject.Subscribe reservations.Add |> ignore
+        reservationSubject.Subscribe reservations.Write |> ignore
 
         let notificationSubject = new Subject<Notification>()
         notificationSubject
@@ -49,8 +100,7 @@ type Startup() =
             let rec loop () =
                 async {
                     let! cmd = inbox.Receive()
-                    let rs = reservations |> ToReservations
-                    let handle = Handle seatingCapacity rs
+                    let handle = Handle seatingCapacity reservations
                     let newReservations = handle cmd
                     match newReservations with 
                     | Some(r) ->
@@ -79,7 +129,7 @@ type Startup() =
         do agent.Start()
 
         Configure
-            (reservations |> ToReservations)
+            reservations
             (Observer.Create (fun x-> agent.Post x))
             (notifications |> Notifications.ToNotifications)
             seatingCapacity
