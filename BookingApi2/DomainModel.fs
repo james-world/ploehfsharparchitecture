@@ -3,9 +3,9 @@
 open System
 
 type Period = 
-    | Year of int
-    | Month of int * int
-    | Day of int * int * int
+    | Year of Year : int
+    | Month of Year : int * Month : int
+    | Day of Year : int * Month : int * Day : int
 
 module Dates =
     let InitInfinite (date : DateTime) =

@@ -60,31 +60,55 @@ type NotificationsController(notifications : Notifications.INotifications) =
 
     member this.Notifications = notifications
 
-type AvailabilityController(seatingCapacity : int) =
+type AvailabilityController(reservations: Reservations.IReservations,
+                            seatingCapacity : int) =
     inherit ApiController()
+
+    let getAvailableSeats map date =
+        if map |> Map.containsKey date then
+            seatingCapacity - (map |> Map.find date)
+        else seatingCapacity
 
     [<Route("availability/{year}")>]
     member this.Get year =
+        let (min, max) = Dates.BoundariesIn(Year year)
+        let map =
+            reservations
+            |> Reservations.Between min max
+            |> Seq.groupBy (fun r -> r.Item.Date)
+            |> Seq.map (fun (d, rs) ->
+                (d, rs |> Seq.sumBy (fun r -> r.Item.Quantity)))
+            |> Map.ofSeq
+
         let now = DateTimeOffset.Now
         let openings =
             Dates.In(Year(year))
             |> Seq.map (fun d ->
                 {
                     Date = d.Date.ToString "yyyy.MM.dd"
-                    Seats = if d < now.Date then 0 else seatingCapacity } )
+                    Seats = if d < now.Date then 0 else getAvailableSeats map d } )
             |> Seq.toArray
 
         Results.OkNegotiatedContentResult({ Openings = openings }, this)
 
     [<Route("availability/{year}/{month}")>]
     member this.Get(year,month) =
+        let (min, max) = Dates.BoundariesIn(Month(year, month))
+        let map =
+            reservations
+            |> Reservations.Between min max
+            |> Seq.groupBy (fun r -> r.Item.Date)
+            |> Seq.map (fun (d, rs) ->
+                (d, rs |> Seq.sumBy (fun r -> r.Item.Quantity)))
+            |> Map.ofSeq
+
         let now = DateTimeOffset.Now
         let openings =
             Dates.In(Month(year, month))
             |> Seq.map (fun d ->
                 {
                     Date = d.Date.ToString "yyyy.MM.dd"
-                    Seats = if d < now.Date then 0 else seatingCapacity } )
+                    Seats = if d < now.Date then 0 else getAvailableSeats map d } )
             |> Seq.toArray
 
         Results.OkNegotiatedContentResult({ Openings = openings }, this)
@@ -92,12 +116,24 @@ type AvailabilityController(seatingCapacity : int) =
 
     [<Route("availability/{year}/{month}/{day}")>]
     member this.Get(year,month, day) =
-        let now = DateTimeOffset.Now
-        let requestedDate = DateTime(year, month, day)
-        let opening = {
-            Date = requestedDate.ToString "yyyy.MM.dd"
-            Seats = if requestedDate < now.Date then 0 else seatingCapacity }
+        let (min, max) = Dates.BoundariesIn(Day(year, month, day))
+        let map =
+            reservations
+            |> Reservations.Between min max
+            |> Seq.groupBy (fun r -> r.Item.Date)
+            |> Seq.map (fun (d, rs) ->
+                (d, rs |> Seq.sumBy (fun r -> r.Item.Quantity)))
+            |> Map.ofSeq
 
-        Results.OkNegotiatedContentResult({ Openings = [| opening |] }, this)
+        let now = DateTimeOffset.Now
+        let openings =
+            Dates.In(Day(year, month, day))
+            |> Seq.map (fun d ->
+                {
+                    Date = d.Date.ToString "yyyy.MM.dd"
+                    Seats = if d < now.Date then 0 else getAvailableSeats map d } )
+            |> Seq.toArray
+
+        Results.OkNegotiatedContentResult({ Openings = openings }, this)
 
     member this.SeatingCapacity = seatingCapacity

@@ -29,7 +29,7 @@ type CompositionRoot(reservations : IReservations,
                 let c = new NotificationsController(notifications)
                 c :> IHttpController
             elif controllerType = typeof<AvailabilityController> then
-                let c = new AvailabilityController(seatingCapacity)
+                let c = new AvailabilityController(reservations, seatingCapacity)
                 c :> IHttpController
             else
                 invalidArg (sprintf "Unknown controller type requested: %O" controllerType) "controllerType"
