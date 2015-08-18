@@ -190,3 +190,4 @@ ModelManifest.xml
 
 # Reservations Store
 BookingApi2.WebHost/ReservationStore/
+BookingApi2.WebHost/NotificationStore/
