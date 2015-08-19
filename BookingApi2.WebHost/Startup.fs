@@ -125,6 +125,30 @@ type NotificationsInAzureBlobs(blobContainer : CloudBlobContainer) =
         member this.GetEnumerator() =
             (this :> seq<Envelope<Notification>>).GetEnumerator() :> System.Collections.IEnumerator
 
+type ErrorsInAzureBlobs(blobContainer : CloudBlobContainer) =
+    let getId (d : DateTime) =
+        String.Join(
+            "/",
+            [
+                d.Year.ToString()
+                d.Month.ToString()
+                d.Day.ToString()
+                Guid.NewGuid().ToString()
+            ])
+            |> sprintf "%s.txt"
+
+    member this.Write e =
+        let id = getId DateTimeOffset.UtcNow.Date
+        let b = blobContainer.GetBlockBlobReference id
+        b.Properties.ContentType <- "text/plain; charset=utf-8"
+        b.UploadText(e.ToString())
+
+    interface System.Web.Http.Filters.IExceptionFilter with
+        member this.AllowMultiple = true
+        member this.ExecuteExceptionFilterAsync(actionExecutedContext, cancellationToken) =
+            System.Threading.Tasks.Task.Factory.StartNew(
+                fun () -> this.Write actionExecutedContext.Exception)
+
 module AzureQ =
     let enqueue (q : Queue.CloudQueue) msg =
         let json = JsonConvert.SerializeObject msg
@@ -143,7 +167,7 @@ type Startup() =
 
     static member RegisterWebApi(config: HttpConfiguration) =
         // Configure routing
-        config.MapHttpAttributeRoutes()
+        config.MapHttpAttributeRoutes()        
 
         // Configure serialization
         config.Formatters.XmlFormatter.UseXmlSerializer <- true
@@ -157,6 +181,13 @@ type Startup() =
         let storageAccount =
             CloudConfigurationManager.GetSetting "storageConnectionString"
             |> CloudStorageAccount.Parse
+
+        let errorContainer =
+            storageAccount
+                .CreateCloudBlobClient()
+                .GetContainerReference("errors")
+        errorContainer.CreateIfNotExists() |> ignore
+        let errorHandler = ErrorsInAzureBlobs(errorContainer)
 
         let rq =
             storageAccount
@@ -194,35 +225,37 @@ type Startup() =
         |> ignore
 
         let handleR (msg : Queue.CloudQueueMessage) =
-            let json = msg.AsString
-            let cmd =
-                JsonConvert.DeserializeObject<Envelope<MakeReservation>> json
-            let condition = reservations.GetAccessCondition cmd.Item.Date
-            let newReservations = Handle seatingCapacity reservations cmd
-            match newReservations with 
-                | Some(r) ->
-                    reservationSubject.OnNext(r, cmd.Id, condition) 
-                    notificationSubject.OnNext
-                        {
-                            About = cmd.Id
-                            Type = "Success"
-                            Message =
-                                sprintf
-                                    "Your reservation for %s was completed. We look forward to seeing you."
-                                    (cmd.Item.Date.ToString "yyyy.MM.dd")
-                        }
-                | _ ->
-                    notificationSubject.OnNext
-                        {
-                            About = cmd.Id
-                            Type = "Failure"
-                            Message =
-                                sprintf
-                                    "We regret to inform you that your reservation for %s could not be completed, because we are already fully booked."
-                                    (cmd.Item.Date.ToString "yyyy.MM.dd")
-                        }
+            try
+                let json = msg.AsString
+                let cmd =
+                    JsonConvert.DeserializeObject<Envelope<MakeReservation>> json
+                let condition = reservations.GetAccessCondition cmd.Item.Date
+                let newReservations = Handle seatingCapacity reservations cmd
+                match newReservations with 
+                    | Some(r) ->
+                        reservationSubject.OnNext(r, cmd.Id, condition) 
+                        notificationSubject.OnNext
+                            {
+                                About = cmd.Id
+                                Type = "Success"
+                                Message =
+                                    sprintf
+                                        "Your reservation for %s was completed. We look forward to seeing you."
+                                        (cmd.Item.Date.ToString "yyyy.MM.dd")
+                            }
+                    | _ ->
+                        notificationSubject.OnNext
+                            {
+                                About = cmd.Id
+                                Type = "Failure"
+                                Message =
+                                    sprintf
+                                        "We regret to inform you that your reservation for %s could not be completed, because we are already fully booked."
+                                        (cmd.Item.Date.ToString "yyyy.MM.dd")
+                            }
 
-            rq.DeleteMessage msg
+                rq.DeleteMessage msg
+            with e -> errorHandler.Write e
 
         System.Reactive.Linq.Observable.Interval(TimeSpan.FromSeconds 10.)
         |> Observable.map (fun _ -> AzureQ.dequeue rq)
@@ -231,11 +264,13 @@ type Startup() =
         |> ignore
 
         let handleN (msg : Queue.CloudQueueMessage) =
-            let json = msg.AsString
-            let notification =
-                JsonConvert.DeserializeObject<Envelope<Notification>> json
-            notifications.Write notification            
-            nq.DeleteMessage msg
+            try
+                let json = msg.AsString
+                let notification =
+                    JsonConvert.DeserializeObject<Envelope<Notification>> json
+                notifications.Write notification            
+                nq.DeleteMessage msg
+            with e -> errorHandler.Write e
 
         System.Reactive.Linq.Observable.Interval(TimeSpan.FromSeconds 10.)
         |> Observable.map (fun _ -> AzureQ.dequeue nq)
@@ -244,6 +279,8 @@ type Startup() =
         |> ignore
         
         let config = new HttpConfiguration()
+
+        config.Filters.Add errorHandler
 
         Configure
             reservations
