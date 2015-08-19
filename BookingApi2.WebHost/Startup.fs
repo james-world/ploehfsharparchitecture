@@ -61,17 +61,22 @@ type ReservationsInAzureBlobs (blobContainer : CloudBlobContainer) =
                 when e.RequestInformation.HttpStatusCode = 404 ->
                     { Reservations = [||]; AcceptedCommandIds = [||] }
 
-        let updated =
-            {
-                Reservations =
-                    Array.append [| reservation |] inStore.Reservations
-                AcceptedCommandIds =
-                    Array.append [| commandId |] inStore.AcceptedCommandIds
-            }
+        let isReplay =
+            inStore.AcceptedCommandIds
+            |> Array.exists (fun id -> commandId = id)
 
-        let json = JsonConvert.SerializeObject updated
-        b.Properties.ContentType <- "application/json"
-        b.UploadText(json, accessCondition = condition)
+        if not isReplay then 
+            let updated =
+                {
+                    Reservations =
+                        Array.append [| reservation |] inStore.Reservations
+                    AcceptedCommandIds =
+                        Array.append [| commandId |] inStore.AcceptedCommandIds
+                }
+
+            let json = JsonConvert.SerializeObject updated
+            b.Properties.ContentType <- "application/json"
+            b.UploadText(json, accessCondition = condition)
 
     interface IReservations with
         member this.Between min max =
