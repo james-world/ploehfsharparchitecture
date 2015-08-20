@@ -13,99 +13,152 @@ open BookingApi2.Infrastructure
 open BookingApi2.Reservations
 open System.Collections.Concurrent
 open System.Reactive.Subjects
-open System.IO
+open Microsoft.WindowsAzure.Storage.Blob
 open Newtonsoft.Json
+open Microsoft.WindowsAzure.Storage
+open Microsoft.Azure
 
+[<CLIMutable>]
+type StoredReservations = {
+    Reservations : Envelope<Reservation> array
+    AcceptedCommandIds : Guid array }
 
-type ReservationsInFiles(directory : DirectoryInfo) =
-    let toReservation (f: FileInfo) =
-        let json = File.ReadAllText f.FullName
-        JsonConvert.DeserializeObject<Envelope<Reservation>>(json)
+type ReservationsInAzureBlobs (blobContainer : CloudBlobContainer) =
+    let toReservation (b : CloudBlockBlob) =
+        let json = b.DownloadText()
+        let sr = JsonConvert.DeserializeObject<StoredReservations> json
+        sr.Reservations
     let toEnumerator (s : seq<'a>) = s.GetEnumerator()
-    let getContainingDirectory (d : DateTime) =
-        Path.Combine(
-            directory.FullName,
-            d.Year.ToString(),
-            d.Month.ToString(),
-            d.Day.ToString())
-    let appendPath p2 p1 = Path.Combine(p1, p2)
-    let getJsonFiles (dir : DirectoryInfo) =
-        if Directory.Exists(dir.FullName) then
-            dir.EnumerateFiles("*.json", SearchOption.AllDirectories)
-        else
-            Seq.empty<FileInfo>
+    let getId (d: DateTime) =
+        String.Join(
+            "/",
+            [
+                d.Year.ToString()
+                d.Month.ToString()
+                d.Day.ToString()
+            ])
+            |> sprintf "%s.json"
 
-    member this.Write (reservation : Envelope<Reservation>) =
-        let withExtension extension path = Path.ChangeExtension(path, extension)
-        let directoryName = reservation.Item.Date |> getContainingDirectory
-        let fileName =
-            directoryName
-            |> appendPath (reservation.Id.ToString())
-            |> withExtension "json"
-        let json = JsonConvert.SerializeObject reservation
-        Directory.CreateDirectory directoryName |> ignore
-        File.WriteAllText(fileName, json)
+    member this.GetAccessCondition date =
+        let id = date |> getId
+        let b = blobContainer.GetBlockBlobReference id
+        try
+            b.FetchAttributes()
+            b.Properties.ETag |> AccessCondition.GenerateIfMatchCondition
+        with
+        | :? StorageException as e when e.RequestInformation.HttpStatusCode = 404 ->
+            AccessCondition.GenerateIfNoneMatchCondition "*"
+
+    member this.Write (reservation : Envelope<Reservation>, commandId, condition) =
+        let id = reservation.Item.Date |> getId
+        let b = blobContainer.GetBlockBlobReference id
+        let inStore =
+            try
+                let jsonInStore = b.DownloadText(accessCondition = condition)
+                JsonConvert.DeserializeObject<StoredReservations> jsonInStore
+            with
+            | :? StorageException as e
+                when e.RequestInformation.HttpStatusCode = 404 ->
+                    { Reservations = [||]; AcceptedCommandIds = [||] }
+
+        let isReplay =
+            inStore.AcceptedCommandIds
+            |> Array.exists (fun id -> commandId = id)
+
+        if not isReplay then 
+            let updated =
+                {
+                    Reservations =
+                        Array.append [| reservation |] inStore.Reservations
+                    AcceptedCommandIds =
+                        Array.append [| commandId |] inStore.AcceptedCommandIds
+                }
+
+            let json = JsonConvert.SerializeObject updated
+            b.Properties.ContentType <- "application/json"
+            b.UploadText(json, accessCondition = condition)
 
     interface IReservations with
         member this.Between min max =
             Dates.InitInfinite min
-            |> Seq.takeWhile (fun d-> d <= max)
-            |> Seq.map getContainingDirectory
-            |> Seq.collect (fun dir -> DirectoryInfo(dir) |> getJsonFiles)
-            |> Seq.map toReservation
+            |> Seq.takeWhile (fun d -> d <= max)
+            |> Seq.map getId
+            |> Seq.map blobContainer.GetBlockBlobReference
+            |> Seq.filter (fun b -> b.Exists())
+            |> Seq.collect toReservation
 
         member this.GetEnumerator() =
-            directory
-            |> getJsonFiles
-            |> Seq.map toReservation
+            blobContainer.ListBlobs()
+            |> Seq.cast<CloudBlockBlob>
+            |> Seq.collect toReservation
             |> toEnumerator
 
         member this.GetEnumerator() =
-            (this :> seq<Envelope<Reservation>>).GetEnumerator()
-                :> System.Collections.IEnumerator
+            (this :> seq<Envelope<Reservation>>).GetEnumerator() :> System.Collections.IEnumerator
 
-type NotificationsInFiles(directory : DirectoryInfo) =
-    let toNotification (f : FileInfo) =
-        let json = File.ReadAllText f.FullName
-        JsonConvert.DeserializeObject<Envelope<Notification>>(json)
+type NotificationsInAzureBlobs(blobContainer : CloudBlobContainer) =
+    let toNotification (b : CloudBlockBlob) =
+        let json = b.DownloadText()
+        JsonConvert.DeserializeObject<Envelope<Notification>> json
     let toEnumerator (s : seq<'a>) = s.GetEnumerator()
-    let getContainingDirectory id =
-        Path.Combine(directory.FullName, id.ToString())
-    let appendPath p2 p1 = Path.Combine(p1, p2)
-    let getJsonFiles (dir : DirectoryInfo) =
-        if Directory.Exists(dir.FullName) then
-            dir.EnumerateFiles("*.json", SearchOption.AllDirectories)
-        else
-            Seq.empty<FileInfo>
 
-    member this.Write (notification : Envelope<Notification>) =
-        let withExtension extension path = Path.ChangeExtension(path, extension)
-        let directoryName = notification.Item.About |> getContainingDirectory
-        let fileName =
-            directoryName
-            |> appendPath (notification.Id.ToString())
-            |> withExtension "json"
+    member this.Write notification =
+        let id = sprintf "%O/%O.json" notification.Item.About notification.Id
+        let b = blobContainer.GetBlockBlobReference id
+
         let json = JsonConvert.SerializeObject notification
-        Directory.CreateDirectory directoryName |> ignore
-        File.WriteAllText(fileName, json)
+        b.Properties.ContentType <- "application/json"
+        b.UploadText json
 
     interface Notifications.INotifications with
         member this.About id =
-            id
-            |> getContainingDirectory
-            |> (fun dir -> DirectoryInfo(dir))
-            |> getJsonFiles
+            blobContainer.ListBlobs(id.ToString(), true)
+            |> Seq.cast<CloudBlockBlob>
             |> Seq.map toNotification
 
         member this.GetEnumerator() =
-            directory
-            |> getJsonFiles
+            blobContainer.ListBlobs(useFlatBlobListing = true)
+            |> Seq.cast<CloudBlockBlob>
             |> Seq.map toNotification
             |> toEnumerator
 
         member this.GetEnumerator() =
             (this :> seq<Envelope<Notification>>).GetEnumerator() :> System.Collections.IEnumerator
-     
+
+type ErrorsInAzureBlobs(blobContainer : CloudBlobContainer) =
+    let getId (d : DateTime) =
+        String.Join(
+            "/",
+            [
+                d.Year.ToString()
+                d.Month.ToString()
+                d.Day.ToString()
+                Guid.NewGuid().ToString()
+            ])
+            |> sprintf "%s.txt"
+
+    member this.Write e =
+        let id = getId DateTimeOffset.UtcNow.Date
+        let b = blobContainer.GetBlockBlobReference id
+        b.Properties.ContentType <- "text/plain; charset=utf-8"
+        b.UploadText(e.ToString())
+
+    interface System.Web.Http.Filters.IExceptionFilter with
+        member this.AllowMultiple = true
+        member this.ExecuteExceptionFilterAsync(actionExecutedContext, cancellationToken) =
+            System.Threading.Tasks.Task.Factory.StartNew(
+                fun () -> this.Write actionExecutedContext.Exception)
+
+module AzureQ =
+    let enqueue (q : Queue.CloudQueue) msg =
+        let json = JsonConvert.SerializeObject msg
+        Queue.CloudQueueMessage(json) |> q.AddMessage
+
+    let dequeue (q : Queue.CloudQueue) =
+        match q.GetMessage() with
+        | null -> None
+        | msg -> Some(msg)
+
 
 type Agent<'a> = Microsoft.FSharp.Control.MailboxProcessor<'a>
 
@@ -114,7 +167,7 @@ type Startup() =
 
     static member RegisterWebApi(config: HttpConfiguration) =
         // Configure routing
-        config.MapHttpAttributeRoutes()
+        config.MapHttpAttributeRoutes()        
 
         // Configure serialization
         config.Formatters.XmlFormatter.UseXmlSerializer <- true
@@ -124,36 +177,63 @@ type Startup() =
 
     member __.Configuration(builder: IAppBuilder) =
         let seatingCapacity = 10
-        let config = new HttpConfiguration()
 
-        let dir = DirectoryInfo(System.Web.HttpContext.Current.Server.MapPath("~/ReservationStore"))
+        let storageAccount =
+            CloudConfigurationManager.GetSetting "storageConnectionString"
+            |> CloudStorageAccount.Parse
 
-        let reservations =
-            ReservationsInFiles(
-                DirectoryInfo(System.Web.HttpContext.Current.Server.MapPath("~/ReservationStore")))
+        let errorContainer =
+            storageAccount
+                .CreateCloudBlobClient()
+                .GetContainerReference("errors")
+        errorContainer.CreateIfNotExists() |> ignore
+        let errorHandler = ErrorsInAzureBlobs(errorContainer)
 
-        let notifications =
-            NotificationsInFiles(
-                DirectoryInfo(System.Web.HttpContext.Current.Server.MapPath("~/NotificationStore")))
+        let rq =
+            storageAccount
+                .CreateCloudQueueClient()
+                .GetQueueReference("reservations")
+        rq.CreateIfNotExists() |> ignore
 
-        let reservationSubject = new Subject<Envelope<Reservation>>()
+        let reservationsContainer =
+            storageAccount
+                .CreateCloudBlobClient()
+                .GetContainerReference("reservations")
+        reservationsContainer.CreateIfNotExists() |> ignore
+
+        let reservations = ReservationsInAzureBlobs(reservationsContainer)        
+        
+        let nq =
+            storageAccount
+                .CreateCloudQueueClient()
+                .GetQueueReference("notifications")
+        nq.CreateIfNotExists() |> ignore
+        let notificationsContainer =
+            storageAccount
+                .CreateCloudBlobClient()
+                .GetContainerReference("notifications")
+        notificationsContainer.CreateIfNotExists() |> ignore
+        let notifications = NotificationsInAzureBlobs(notificationsContainer)
+
+        let reservationSubject = new Subject<Envelope<Reservation> * Guid * AccessCondition>()
         reservationSubject.Subscribe reservations.Write |> ignore
 
         let notificationSubject = new Subject<Notification>()
         notificationSubject
         |> Observable.map EnvelopWithDefaults
-        |> Observable.subscribe notifications.Write
+        |> Observable.subscribe (AzureQ.enqueue nq)
         |> ignore
 
-        let agent = new Agent<Envelope<MakeReservation>>(fun inbox ->
-            let rec loop () =
-                async {
-                    let! cmd = inbox.Receive()
-                    let handle = Handle seatingCapacity reservations
-                    let newReservations = handle cmd
-                    match newReservations with 
+        let handleR (msg : Queue.CloudQueueMessage) =
+            try
+                let json = msg.AsString
+                let cmd =
+                    JsonConvert.DeserializeObject<Envelope<MakeReservation>> json
+                let condition = reservations.GetAccessCondition cmd.Item.Date
+                let newReservations = Handle seatingCapacity reservations cmd
+                match newReservations with 
                     | Some(r) ->
-                        reservationSubject.OnNext r
+                        reservationSubject.OnNext(r, cmd.Id, condition) 
                         notificationSubject.OnNext
                             {
                                 About = cmd.Id
@@ -173,13 +253,38 @@ type Startup() =
                                         "We regret to inform you that your reservation for %s could not be completed, because we are already fully booked."
                                         (cmd.Item.Date.ToString "yyyy.MM.dd")
                             }
-                    return! loop() }
-            loop())
-        do agent.Start()
+
+                rq.DeleteMessage msg
+            with e -> errorHandler.Write e
+
+        System.Reactive.Linq.Observable.Interval(TimeSpan.FromSeconds 10.)
+        |> Observable.map (fun _ -> AzureQ.dequeue rq)
+        |> Observable.choose id
+        |> Observable.subscribe handleR
+        |> ignore
+
+        let handleN (msg : Queue.CloudQueueMessage) =
+            try
+                let json = msg.AsString
+                let notification =
+                    JsonConvert.DeserializeObject<Envelope<Notification>> json
+                notifications.Write notification            
+                nq.DeleteMessage msg
+            with e -> errorHandler.Write e
+
+        System.Reactive.Linq.Observable.Interval(TimeSpan.FromSeconds 10.)
+        |> Observable.map (fun _ -> AzureQ.dequeue nq)
+        |> Observable.choose id
+        |> Observable.subscribe handleN
+        |> ignore
+        
+        let config = new HttpConfiguration()
+
+        config.Filters.Add errorHandler
 
         Configure
             reservations
-            (Observer.Create (fun x-> agent.Post x))
+            (Observer.Create (fun msg -> AzureQ.enqueue rq msg))
             notifications
             seatingCapacity
             config
